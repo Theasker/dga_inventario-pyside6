@@ -1,6 +1,6 @@
 # Sistema de Inventario de Dispositivos Tecnológicos 🏢💻
 
-Aplicación de escritorio robusta desarrollada en **Python** y **PySide6** para la gestión, control y auditoría de inventario de hardware. Diseñada originalmente para su uso en entornos administrativos del Gobierno de Aragón.
+Aplicación de escritorio desarrollada en **Python** y **PySide6** para la gestión, control y auditoría de inventario de hardware. 
 
 ## Características Principales 🚀
 
@@ -9,7 +9,6 @@ Aplicación de escritorio robusta desarrollada en **Python** y **PySide6** para 
 * **Importación Masiva**: Carga de datos desde archivos **CSV** con validación de campos.
 * **Informes Profesionales en PDF**: Generación de reportes detallados mediante **ReportLab**, con agrupación jerárquica por Sección -> Lugar y ordenación alfabética por usuario.
 * **Base de Datos Local**: Implementación con **SQLite** para una portabilidad total sin necesidad de servidores externos.
-* **Interfaz Adaptativa**: Diseño limpio y profesional con iconos personalizados y diálogos intuitivos.
 
 ## Requisitos del Sistema 📋
 
@@ -52,5 +51,12 @@ Para importar datos correctamente, el archivo CSV debe estar delimitado por punt
 
 Si deseas generar una versión distribuible para Windows sin necesidad de instalar Python:
 
+Para Windows
 ```bash
 pyinstaller --noconfirm --onedir --windowed --add-data "logo_servicio.png;." main.py
+```
+
+Para Linux
+```bash
+pyinstaller --noconfirm --onedir --windowed --add-data "logo_servicio.png:." main.py
+```
