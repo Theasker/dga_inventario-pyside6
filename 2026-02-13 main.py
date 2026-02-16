@@ -1,0 +1,992 @@
+import sys
+import sqlite3
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QSizePolicy,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTableWidget,
+    QHeaderView,
+    QTableWidgetItem,
+    QComboBox,
+    QPushButton,
+    QLineEdit,
+    QLabel,
+    QMessageBox,
+    QDialog, 
+    QFormLayout, 
+    QDialogButtonBox,
+    QDateEdit,
+    QFrame
+)
+from PySide6.QtCore import Qt, QDate
+
+
+# --- MODELO ---
+class InventarioModel:
+    def __init__(self, db_path="inventario.db"):
+        self.db_path = db_path
+        self.crear_estructura_si_no_existe()
+
+    def conectar(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA foreign_keys = ON")  # Integridad referencial
+        return conn
+
+    def crear_estructura_si_no_existe(self):
+        with self.conectar() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS secciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT UNIQUE NOT NULL)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS tipos_dispositivo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                nombre TEXT UNIQUE NOT NULL)''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS ubicaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                seccion_id INTEGER,
+                UNIQUE(nombre, seccion_id), 
+                FOREIGN KEY (seccion_id) REFERENCES secciones(id))''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT UNIQUE NOT NULL, 
+                correo TEXT UNIQUE)''')
+            cursor.execute(
+                """CREATE TABLE IF NOT EXISTS dispositivos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, tipo_dispositivo_id INTEGER NOT NULL,
+                marca TEXT NOT NULL, modelo TEXT NOT NULL, fecha_registro DATE, observaciones TEXT,
+                FOREIGN KEY (tipo_dispositivo_id) REFERENCES tipos_dispositivo(id))"""
+            )
+            cursor.execute('''CREATE TABLE IF NOT EXISTS asignaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dispositivo_id INTEGER,
+                ubicacion_id INTEGER,
+                usuario_id INTEGER,  -- Aquí permitimos nulos
+                fecha TEXT,
+                FOREIGN KEY(dispositivo_id) REFERENCES dispositivos(id) ON DELETE CASCADE,
+                FOREIGN KEY(ubicacion_id) REFERENCES ubicaciones(id),
+                FOREIGN KEY(usuario_id) REFERENCES usuarios(id))''')
+
+            # Datos base iniciales
+            cursor.execute(
+                """INSERT OR IGNORE INTO tipos_dispositivo (nombre) 
+                        VALUES ('PC'), ('Monitor'), ('Impresora'), ('Teclado'), ('Cámara'), ('WebCam'), ('Auriculares'), ('Teléfono')"""
+            )
+            conn.commit()
+
+    def obtener_secciones(self):
+        with self.conectar() as conn:
+            return conn.execute("SELECT id, nombre FROM secciones").fetchall()
+
+    def obtener_usuarios(self):
+        with self.conectar() as conn:
+            return conn.execute(
+                "SELECT id, nombre, correo FROM usuarios ORDER BY nombre"
+            ).fetchall()
+
+    def obtener_tipos_dispositivo(self):
+        with self.conectar() as conn:
+            return conn.execute("SELECT id, nombre FROM tipos_dispositivo").fetchall()
+
+    def obtener_ubicaciones_por_seccion(self, seccion_id):
+        with self.conectar() as conn:
+            return conn.execute(
+                "SELECT id, nombre FROM ubicaciones WHERE seccion_id = ?", (seccion_id,)
+            ).fetchall()
+
+    def obtener_inventario_completo(self, busqueda="", seccion_id=None):
+        # 1. Definimos la base de la consulta (usamos LEFT JOIN para ver equipos sin dueño)
+        query = '''SELECT d.id, l.nombre, u.nombre, u.correo, t.nombre, d.marca, d.modelo, a.fecha, d.observaciones
+                   FROM dispositivos d
+                   JOIN asignaciones a ON d.id = a.dispositivo_id
+                   JOIN ubicaciones l ON a.ubicacion_id = l.id
+                   JOIN secciones s ON l.seccion_id = s.id
+                   JOIN tipos_dispositivo t ON d.tipo_dispositivo_id = t.id
+                   LEFT JOIN usuarios u ON a.usuario_id = u.id
+                   WHERE (u.nombre LIKE ? OR d.marca LIKE ? OR d.modelo LIKE ? OR u.nombre IS NULL)'''
+        
+        # 2. Preparamos los parámetros para los 3 primeros '?'
+        params = [f'%{busqueda}%', f'%{busqueda}%', f'%{busqueda}%']
+        
+        # 3. Si hay filtro de sección, añadimos la condición y el parámetro extra
+        if seccion_id:
+            query += " AND s.id = ?"
+            params.append(seccion_id)
+            
+        with self.conectar() as conn:
+            # Aquí estaba el error: ahora pasamos 'params' correctamente
+            return conn.execute(query, params).fetchall()
+
+    def añadir_dispositivo_completo(self, datos):
+        try:
+            with self.conectar() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO dispositivos (tipo_dispositivo_id, marca, modelo, observaciones, fecha_registro) VALUES (?,?,?,?,DATE('now'))",
+                    (
+                        datos["tipo_id"],
+                        datos["marca"],
+                        datos["modelo"],
+                        datos["observaciones"],
+                    ),
+                )
+                d_id = cursor.lastrowid
+                cursor.execute(
+                    "INSERT INTO asignaciones (dispositivo_id, ubicacion_id, usuario_id) VALUES (?,?,?)",
+                    (d_id, datos["ubicacion_id"], datos["usuario_id"]),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
+
+    def eliminar_registro(self, d_id):
+        with self.conectar() as conn:
+            conn.execute("DELETE FROM asignaciones WHERE dispositivo_id=?", (d_id,))
+            conn.execute("DELETE FROM dispositivos WHERE id=?", (d_id,))
+            conn.commit()
+
+    def eliminar_seccion(self, id_sec):
+        try:
+            with self.conectar() as conn:
+                conn.execute("DELETE FROM secciones WHERE id = ?", (id_sec,))
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError:
+            return False  # No se puede borrar si tiene dependencias
+
+    def eliminar_ubicacion(self, id_ub):
+        try:
+            with self.conectar() as conn:
+                conn.execute("DELETE FROM ubicaciones WHERE id = ?", (id_ub,))
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def eliminar_usuario(self, id_usr):
+        try:
+            with self.conectar() as conn:
+                conn.execute("DELETE FROM usuarios WHERE id = ?", (id_usr,))
+                conn.commit()
+                return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def actualizar_nombre_entidad(self, tabla, id_ent, nuevo_nombre):
+        """Método genérico para renombrar Secciones, Lugares o Usuarios"""
+        try:
+            with self.conectar() as conn:
+                conn.execute(f"UPDATE {tabla} SET nombre = ? WHERE id = ?", (nuevo_nombre, id_ent))
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def actualizar_dispositivo_completo(self, d_id, datos):
+        with self.conectar() as conn:
+            cursor = conn.cursor()
+            # Actualizamos datos técnicos
+            cursor.execute('''UPDATE dispositivos 
+                              SET tipo_dispositivo_id=?, marca=?, modelo=?, observaciones=? 
+                              WHERE id=?''',
+                           (datos['tipo_id'], datos['marca'], datos['modelo'], datos['observaciones'], d_id))
+            
+            # Actualizamos asignación (incluyendo la fecha)
+            cursor.execute('''UPDATE asignaciones 
+                              SET ubicacion_id=?, usuario_id=?, fecha=? 
+                              WHERE dispositivo_id=?''',
+                           (datos['ubicacion_id'], datos['usuario_id'], datos['fecha'], d_id))
+            conn.commit()
+            return True
+
+    def añadir_seccion(self, nombre):
+        with self.conectar() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", (nombre,)
+            )
+            conn.commit()
+
+    def añadir_usuario(self, nombre, correo):
+        with self.conectar() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO usuarios (nombre, correo) VALUES (?, ?)",
+                (nombre, correo),
+            )
+            conn.commit()
+
+    def actualizar_usuario_completo(self, id_usr, nuevo_nombre, nuevo_correo):
+        try:
+            with self.conectar() as conn:
+                conn.execute(
+                    "UPDATE usuarios SET nombre = ?, correo = ? WHERE id = ?",
+                    (nuevo_nombre, nuevo_correo, id_usr)
+                )
+                conn.commit()
+                return True
+        except sqlite3.Error as e:
+            print(f"Error al actualizar usuario: {e}")
+            return False
+
+    def añadir_ubicacion(self, nombre, seccion_id):
+        try:
+            with self.conectar() as conn:
+                conn.execute(
+                    "INSERT INTO ubicaciones (nombre, seccion_id) VALUES (?, ?)",
+                    (nombre, seccion_id),
+                )
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def añadir_tipo_dispositivo(self, nombre):
+        try:
+            with self.conectar() as conn:
+                conn.execute("INSERT INTO tipos_dispositivo (nombre) VALUES (?)", (nombre,))
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def importar_desde_csv(self, ruta_archivo, progreso_callback=None):
+        import csv
+        from datetime import datetime
+        
+        # Fecha de hoy por si el CSV no trae fecha
+        fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+        
+        try:
+            print(f"\n>>> Control: Abriendo archivo {ruta_archivo}")
+            with open(ruta_archivo, 'r', encoding='utf-8-sig') as f:
+                lineas = [l for l in f.readlines() if l.strip() and not l.strip().startswith(';')]
+                total_filas = len(lineas) - 1
+                f.seek(0)
+                
+                lector = csv.DictReader(f, delimiter=';')
+
+                with self.conectar() as conn:
+                    cursor = conn.cursor()
+                    for i, fila_raw in enumerate(lector):
+                        # Limpiar nombres de columnas
+                        fila = {k.strip(): v for k, v in fila_raw.items() if k is not None}
+                        
+                        # Si no hay sección o tipo, saltamos la fila (posible fila vacía de Excel)
+                        if not fila.get('Sección') or not fila.get('Tipo dispositivo'):
+                            continue
+
+                        print(f"    > Importando ({i+1}/{total_filas}): {fila.get('Marca')} {fila.get('Modelo')}")
+
+                        # 1. Sección
+                        sec_nom = fila['Sección'].strip()
+                        cursor.execute("INSERT OR IGNORE INTO secciones (nombre) VALUES (?)", (sec_nom,))
+                        cursor.execute("SELECT id FROM secciones WHERE nombre = ?", (sec_nom,))
+                        s_id = cursor.fetchone()[0]
+
+                        # 2. Ubicación
+                        ub_nom = fila.get('Ubicación', 'Sin Ubicación').strip()
+                        cursor.execute("INSERT OR IGNORE INTO ubicaciones (nombre, seccion_id) VALUES (?, ?)", (ub_nom, s_id))
+                        cursor.execute("SELECT id FROM ubicaciones WHERE nombre = ? AND seccion_id = ?", (ub_nom, s_id))
+                        l_id = cursor.fetchone()[0]
+
+                        # 3. Usuario (Lógica de NULOS)
+                        u_nom_raw = fila.get('Apellidos y nombre', '').strip()
+                        u_id = None
+                        if u_nom_raw:
+                            u_mail = fila.get('Correo', '').strip()
+                            cursor.execute("INSERT OR IGNORE INTO usuarios (nombre, correo) VALUES (?, ?)", (u_nom_raw, u_mail))
+                            cursor.execute("SELECT id FROM usuarios WHERE nombre = ?", (u_nom_raw,))
+                            res_u = cursor.fetchone()
+                            if res_u:
+                                u_id = res_u[0]
+
+                        # 4. Tipo dispositivo
+                        t_nom = fila.get('Tipo dispositivo', 'Otros').strip()
+                        cursor.execute("INSERT OR IGNORE INTO tipos_dispositivo (nombre) VALUES (?)", (t_nom,))
+                        cursor.execute("SELECT id FROM tipos_dispositivo WHERE nombre = ?", (t_nom,))
+                        t_id = cursor.fetchone()[0]
+
+                        # 5. Dispositivo
+                        cursor.execute('''INSERT INTO dispositivos (tipo_dispositivo_id, marca, modelo, observaciones)
+                                          VALUES (?, ?, ?, ?)''', 
+                                       (t_id, fila.get('Marca', ''), fila.get('Modelo', ''), fila.get('Observaciones', '')))
+                        d_id = cursor.lastrowid
+
+                        # 6. Asignación y Fecha
+                        fecha_raw = fila.get('Fecha', '').strip()
+                        fecha_val = fecha_raw if fecha_raw else fecha_hoy
+                        
+                        cursor.execute('''INSERT INTO asignaciones (dispositivo_id, ubicacion_id, usuario_id, fecha)
+                                          VALUES (?, ?, ?, ?)''', (d_id, l_id, u_id, fecha_val))
+
+                        if progreso_callback:
+                            progreso_callback(i + 1, total_filas)
+                            
+                    conn.commit()
+            print(">>> Control: Importación finalizada con éxito.")
+            return True
+        except Exception as e:
+            print(f"\n!!! ERROR CRÍTICO en el registro {i+1}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+# --- VISTA ---
+class InventarioVista(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Inventario del Servicio de Información y Documentación")
+        self.resize(1200, 800)
+        self._central_widget = QWidget()
+        self.setCentralWidget(self._central_widget)
+        self._layout_principal = QVBoxLayout(self._central_widget)
+        self._create_widgets()
+        self._create_layout()
+        self._apply_style()
+
+    def _create_widgets(self):
+        # --- Grupo SECCIÓN ---
+        self.frame_seccion = QFrame()
+        self.cmb_seccion = QComboBox()
+        self.cmb_seccion.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed) # Hacemos que el combo pueda expandirse horizontalmente
+        self.cmb_seccion.setMinimumWidth(200) # Establecer un ancho mínimo para que no se vea muy pequeño al inicio
+        self.btn_add_seccion = QPushButton("+")
+        self.btn_add_seccion.setFixedSize(30, 30)       
+        self.btn_gear_seccion = QPushButton("⚙️")
+        self.btn_gear_seccion.setFixedSize(30, 30)
+        
+        # --- Búsqueda ---
+        self.txt_busqueda = QLineEdit()
+        self.txt_busqueda.setPlaceholderText("Buscar...")
+
+        # --- Grupo LUGAR ---
+        self.frame_lugar = QFrame()
+        self.btn_add_lugar = QPushButton("+ Lugar") 
+        self.btn_gear_lugar = QPushButton("⚙️")
+        self.btn_gear_lugar.setFixedSize(30, 30)
+
+        # --- Grupo PERSONA ---
+        self.frame_persona = QFrame()
+        self.btn_add_user = QPushButton("+ Persona")
+        self.btn_gear_user = QPushButton("⚙️")
+        self.btn_gear_user.setFixedSize(30, 30)
+
+        self.btn_add_dispositivo = QPushButton("+ Dispositivo")
+
+        self.btn_importar = QPushButton("📥 Importar CSV")
+        self.btn_importar.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+
+        # Creación de la tabla -------------------------------
+        self.tabla_inventario = QTableWidget()
+        self.tabla_inventario.setColumnCount(10)
+        self.tabla_inventario.setHorizontalHeaderLabels(
+            [
+                "ID",
+                "Lugar",
+                "Usuario",
+                "Correo",
+                "Tipo",
+                "Marca",
+                "Modelo",
+                "Fecha",
+                "Observaciones",
+                "Acciones",
+            ]
+        )
+        self.tabla_inventario.setColumnHidden(0, True)
+
+        # Ajuste de la cabecera vertical (índice 1, 2, 3...)
+        v_header = self.tabla_inventario.verticalHeader()
+        v_header.setSectionResizeMode(QHeaderView.Fixed)
+        v_header.setFixedWidth(45)
+
+        # Permitir que las columnas sean redimensionables interactivamente
+        header = self.tabla_inventario.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)  # Estirar "Usuario"
+        header.setSectionResizeMode(8, QHeaderView.Stretch)  # Estirar "Observaciones"
+        # FIN creación de tabla -----------------------
+
+        # Crear el selector de fecha
+        self.date_picker = QDateEdit()
+        self.date_picker.setCalendarPopup(True)  # Esto despliega un calendario real al hacer clic
+        self.date_picker.setDate(QDate.currentDate())  # Por defecto, la fecha de hoy
+        self.date_picker.setDisplayFormat("yyyy/MM/dd")  # Lo que ve el usuario
+
+    def _create_layout(self):
+        ly_superior = QHBoxLayout()
+
+        # Layout interno SECCIÓN
+        self.frame_seccion.setObjectName("frameVerde") # Asignamos nombre para el estilo        
+        ly_seccion = QHBoxLayout(self.frame_seccion)
+        ly_seccion.addWidget(QLabel("Sección:"))
+        ly_seccion.addWidget(self.cmb_seccion)
+        ly_seccion.addWidget(self.btn_add_seccion)
+        ly_seccion.addWidget(self.btn_gear_seccion)
+        ly_superior.addWidget(self.frame_seccion)
+
+        # Layout interno LUGAR
+        self.frame_lugar.setObjectName("frameAzul")
+        ly_lugar = QHBoxLayout(self.frame_lugar)
+        ly_lugar.addWidget(self.btn_add_lugar)
+        ly_lugar.addWidget(self.btn_gear_lugar)
+        ly_superior.addWidget(self.frame_lugar)
+
+        # Layout interno PERSONA
+        self.frame_persona.setObjectName("frameNaranja")
+        ly_persona = QHBoxLayout(self.frame_persona)
+        ly_persona.addWidget(self.btn_add_user)
+        ly_persona.addWidget(self.btn_gear_user)
+        ly_superior.addWidget(self.frame_persona)
+
+        # Espacio y Buscador
+        ly_superior.addSpacing(10)
+        ly_superior.addWidget(QLabel("🔍"))      
+        ly_superior.addWidget(self.txt_busqueda)
+        ly_superior.addSpacing(10)
+
+        # Botones de acción
+        ly_superior.addWidget(self.btn_add_dispositivo)
+        ly_superior.addWidget(self.btn_importar)
+
+        # Añadir todo al layout principal
+        self._layout_principal.addLayout(ly_superior)
+        self._layout_principal.addWidget(self.tabla_inventario)
+
+    def _apply_style(self):
+        # Estilo general oscuro
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background-color: #3d3d3d; color: #E0E0E0; font-family: 'Segoe UI'; }
+            QLineEdit, QComboBox { background-color: #4f4f4f; border: 1px solid #969696; padding: 4px; color: white; }
+            QPushButton { background-color: #969696; color: #3d3d3d; border-radius: 4px; font-weight: bold; padding: 5px; }
+            QHeaderView::section { background-color: #2d2d2d; color: white; border: 1px solid #555; }
+            
+            /* Quitamos el borde que heredan los Labels dentro de los marcos */
+            QFrame QLabel { border: none; background: transparent; }
+            
+            /* Estilos específicos para cada marco usando su ID */
+            QFrame#frameVerde { border: 2px solid #A5D6A7; border-radius: 8px; background-color: #454545; }
+            QFrame#frameAzul { border: 2px solid #90CAF9; border-radius: 8px; background-color: #454545; }
+            QFrame#frameNaranja { border: 2px solid #FFCC80; border-radius: 8px; background-color: #454545; }
+        """)
+
+        # Estilo específico para el botón de importar
+        self.btn_importar.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold;")
+        
+
+# --- VISTA. Diálogo Gestión ---
+class VentanaGestion(QDialog):
+    def __init__(self, titulo, tabla_db, modelo, funcion_datos, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(titulo)
+        self.resize(450, 400)
+        self.modelo = modelo
+        self.tabla_db = tabla_db
+        self.funcion_datos = funcion_datos
+        
+        layout = QVBoxLayout(self)
+        self.tabla = QTableWidget()
+        self.tabla.setColumnCount(2)
+        self.tabla.setHorizontalHeaderLabels(["Nombre (Doble clic editar)", "Acción"])
+        self.tabla.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        
+        layout.addWidget(self.tabla)
+        self.cargar_datos()
+        
+        # Evento para editar al cambiar el texto de una celda
+        self.tabla.itemChanged.connect(self.editar_registro)
+
+    # En VentanaGestion
+    def cargar_datos(self):
+        self.tabla.blockSignals(True)
+        datos = self.funcion_datos()
+        self.tabla.setRowCount(0)
+        
+        # Configurar columnas según la tabla
+        if self.tabla_db == "usuarios":
+            self.tabla.setColumnCount(3)
+            self.tabla.setHorizontalHeaderLabels(["Nombre", "Correo", "Acción"])
+        else:
+            self.tabla.setColumnCount(2)
+            self.tabla.setHorizontalHeaderLabels(["Nombre", "Acción"])
+
+        for row_idx, fila_data in enumerate(datos):
+            id_ent, nombre = fila_data[0], fila_data[1]
+            self.tabla.insertRow(row_idx)
+            
+            # Celda Nombre
+            item_nom = QTableWidgetItem(str(nombre))
+            item_nom.setData(Qt.UserRole, id_ent)
+            self.tabla.setItem(row_idx, 0, item_nom)
+            
+            col_boton = 1
+            # Si es usuario, añadimos la columna Correo en el índice 1
+            if self.tabla_db == "usuarios":
+                correo = fila_data[2] if len(fila_data) > 2 else ""
+                item_mail = QTableWidgetItem(str(correo))
+                item_mail.setData(Qt.UserRole, id_ent)
+                self.tabla.setItem(row_idx, 1, item_mail)
+                col_boton = 2
+                
+            btn_del = QPushButton("Eliminar")
+            btn_del.setStyleSheet("background-color: #c0392b; color: white;")
+            btn_del.clicked.connect(lambda _, i=id_ent: self.borrar(i))
+            self.tabla.setCellWidget(row_idx, col_boton, btn_del)
+        self.tabla.blockSignals(False)
+
+    def editar_registro(self, item):
+            fila = item.row()
+            id_ent = item.data(Qt.UserRole)
+            
+            if self.tabla_db == "usuarios":
+                # Obtenemos el texto de la celda de nombre (0) y correo (1)
+                nom = self.tabla.item(fila, 0).text().strip()
+                # Verificamos que exista la celda de correo antes de leerla
+                item_correo = self.tabla.item(fila, 1)
+                mail = item_correo.text().strip() if item_correo else ""
+                
+                if nom:
+                    self.modelo.actualizar_usuario_completo(id_ent, nom, mail)
+            else:
+                # Lógica para Secciones o Lugares
+                nuevo_nom = item.text().strip()
+                if nuevo_nom:
+                    self.modelo.actualizar_nombre_entidad(self.tabla_db, id_ent, nuevo_nom)
+            
+            # Opcional: refrescar para asegurar consistencia
+            # self.cargar_datos()
+
+    def borrar(self, id_ent):
+        if QMessageBox.question(self, "Confirmar", "¿Eliminar registro?") == QMessageBox.Yes:
+            exito = False
+            if self.tabla_db == "secciones": 
+                exito = self.modelo.eliminar_seccion(id_ent)
+            elif self.tabla_db == "ubicaciones": 
+                exito = self.modelo.eliminar_ubicacion(id_ent)
+            elif self.tabla_db == "usuarios": 
+                exito = self.modelo.eliminar_usuario(id_ent)
+            
+            if not exito:
+                QMessageBox.critical(self, "Error", "No se puede borrar: El registro está siendo usado en el inventario.")
+            self.cargar_datos()
+
+# --- VISTA. Diálogo Univsersal ---
+class DialogoEntidad(QDialog):
+    def __init__(self, titulo, campos, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(titulo)
+        self.inputs = {}
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        for nombre_campo in campos:
+            line_edit = QLineEdit()
+            form.addRow(f"{nombre_campo}:", line_edit)
+            self.inputs[nombre_campo] = line_edit
+
+        layout.addLayout(form)
+        self.botones = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.botones.accepted.connect(self.accept)
+        self.botones.rejected.connect(self.reject)
+        layout.addWidget(self.botones)
+
+    def obtener_datos(self):
+        # Devuelve un diccionario con {campo: valor}
+        return {nombre: widget.text().strip() for nombre, widget in self.inputs.items()}
+
+# --- CONTROLADOR ---
+class InventarioControlador:
+    def __init__(self, modelo, vista):
+        self.modelo = modelo
+        self.vista = vista
+        self.cargar_filtros()
+        self.actualizar_tabla()
+        self.conectar_eventos()
+
+    def conectar_eventos(self):
+        self.vista.btn_add_dispositivo.clicked.connect(self.añadir_fila_vacia)
+        self.vista.btn_add_user.clicked.connect(self.añadir_usuario_rapido)
+        self.vista.btn_gear_user.clicked.connect(self.abrir_gestion_usuarios)
+        self.vista.btn_add_seccion.clicked.connect(self.añadir_seccion_rapida)
+        self.vista.btn_gear_seccion.clicked.connect(self.abrir_gestion_secciones)
+        self.vista.btn_add_lugar.clicked.connect(self.gestionar_lugar_nuevo)
+        self.vista.btn_gear_lugar.clicked.connect(self.abrir_gestion_lugares)
+        self.vista.txt_busqueda.textChanged.connect(self.actualizar_tabla)
+        self.vista.cmb_seccion.currentIndexChanged.connect(self.actualizar_tabla)
+        self.vista.btn_importar.clicked.connect(self.importar_datos)
+        
+        # ¿menús contextuales o botones de gestión aquí?        
+        self.vista.cmb_seccion.setToolTip("Doble clic para gestionar secciones")
+
+    def cargar_filtros(self, id_a_mantener=None):
+        # Guardamos qué había seleccionado si no nos pasan un ID
+        if id_a_mantener is None:
+            id_a_mantener = self.vista.cmb_seccion.currentData()
+
+        self.vista.cmb_seccion.blockSignals(True)
+        self.vista.cmb_seccion.clear()
+        self.vista.cmb_seccion.addItem("Todas", 0)
+        
+        index_a_seleccionar = 0
+        for i, (id_s, nom) in enumerate(self.modelo.obtener_secciones(), 1):
+            self.vista.cmb_seccion.addItem(nom, id_s)
+            if id_s == id_a_mantener:
+                index_a_seleccionar = i
+                
+        self.vista.cmb_seccion.setCurrentIndex(index_a_seleccionar)
+        self.vista.cmb_seccion.blockSignals(False)
+
+    def actualizar_tabla(self):
+        self.vista.tabla_inventario.setRowCount(0)
+        datos = self.modelo.obtener_inventario_completo(
+            self.vista.txt_busqueda.text(), self.vista.cmb_seccion.currentData()
+        )
+
+        self.vista.tabla_inventario.blockSignals(True)
+        for r_idx, r_data in enumerate(datos):
+            self.vista.tabla_inventario.insertRow(r_idx)
+            for c_idx, val in enumerate(r_data):
+                item = QTableWidgetItem(str(val) if val else "")
+                item.setTextAlignment(Qt.AlignCenter)
+                
+                # Bloqueo del correo: si es la columna 3, quitamos el permiso de edición
+                if c_idx == 3:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                
+                self.vista.tabla_inventario.setItem(r_idx, c_idx, item)
+
+            # --- CORRECCIÓN PUNTO 2: Panel de acciones con Editar y Eliminar ---
+            panel = QWidget()
+            ly = QHBoxLayout(panel)
+            ly.setContentsMargins(2, 0, 2, 0)
+            ly.setSpacing(4)
+
+            btn_edit = QPushButton("✏️")
+            btn_edit.setFixedSize(30, 25)
+            # Conecta el botón a la función que transforma la fila en editable
+            btn_edit.clicked.connect(lambda _, r=r_idx, d=r_data: self.activar_edicion_fila(r, d))
+
+            btn_del = QPushButton("❌")
+            btn_del.setFixedSize(30, 25)
+            btn_del.clicked.connect(lambda _, d_id=r_data[0]: self.eliminar_registro(d_id))
+
+            ly.addWidget(btn_edit)
+            ly.addWidget(btn_del)
+            self.vista.tabla_inventario.setCellWidget(r_idx, 9, panel)
+            # -------------------------------------------------------------------
+
+        self.vista.tabla_inventario.blockSignals(False)
+
+    def añadir_fila_vacia(self):
+        s_id = self.vista.cmb_seccion.currentData()
+        if s_id == 0:
+            return QMessageBox.warning(self.vista, "Aviso", "Selecciona una sección específica antes de añadir.")
+
+        row = self.vista.tabla_inventario.rowCount()
+        self.vista.tabla_inventario.insertRow(row)
+        self.vista.tabla_inventario.setItem(row, 0, QTableWidgetItem("NUEVA"))
+
+        cb_lugar = QComboBox()
+        cb_lugar.addItem("- Seleccionar Lugar -", None)
+        for id_l, nom in self.modelo.obtener_ubicaciones_por_seccion(s_id):
+            cb_lugar.addItem(nom, id_l)
+        self.vista.tabla_inventario.setCellWidget(row, 1, cb_lugar)
+
+        cb_user = QComboBox()
+        cb_user.addItem("- Sin asignar -", None)
+        
+        # Cargamos usuarios y sus correos
+        usuarios_data = self.modelo.obtener_usuarios()
+        for id_u, nom, mail in usuarios_data:
+            cb_user.addItem(nom, id_u)
+            # Guardamos el correo en un rol de datos interno
+            cb_user.setItemData(cb_user.count()-1, mail, Qt.UserRole + 1)
+
+        # Función para actualizar el correo visualmente al elegir usuario
+        def actualizar_mail_nuevo():
+            mail = cb_user.currentData(Qt.UserRole + 1)
+            item_m = QTableWidgetItem(str(mail) if mail else "")
+            # Bloqueamos la edición manual en la tabla principal
+            item_m.setFlags(Qt.ItemIsEnabled) 
+            item_m.setTextAlignment(Qt.AlignCenter)
+            self.vista.tabla_inventario.setItem(row, 3, item_m)
+
+        cb_user.currentIndexChanged.connect(actualizar_mail_nuevo)
+        self.vista.tabla_inventario.setCellWidget(row, 2, cb_user)
+
+        cb_tipo = QComboBox()
+        for id_t, nom in self.modelo.obtener_tipos_dispositivo():
+            cb_tipo.addItem(nom, id_t)
+        self.vista.tabla_inventario.setCellWidget(row, 4, cb_tipo)
+
+        for col in [5, 6, 8]:
+            self.vista.tabla_inventario.setItem(row, col, QTableWidgetItem(""))
+
+        # Ponemos el DatePicker por defecto con la fecha de hoy
+        date_nuevo = QDateEdit()
+        date_nuevo.setCalendarPopup(True)
+        date_nuevo.setDisplayFormat("yyyy-MM-dd")
+        date_nuevo.setDate(QDate.currentDate())
+        self.vista.tabla_inventario.setCellWidget(row, 7, date_nuevo)
+
+        panel = QWidget()
+        ly = QHBoxLayout(panel)
+        ly.setContentsMargins(0, 0, 0, 0)
+        btn_save = QPushButton("💾")
+        btn_save.setFixedSize(30, 25)
+        btn_del = QPushButton("🗑️")
+        btn_del.setFixedSize(30, 25)
+
+        ly.addWidget(btn_save)
+        ly.addWidget(btn_del)
+
+        btn_save.clicked.connect(lambda: self.guardar_fila_especifica(row))
+        btn_del.clicked.connect(lambda: self.vista.tabla_inventario.removeRow(row))
+        self.vista.tabla_inventario.setCellWidget(row, 9, panel)
+
+    def añadir_usuario_rapido(self):
+        dial = DialogoEntidad("Nueva Persona", ["Nombre", "Correo"], self.vista)
+        if dial.exec():
+            datos = dial.obtener_datos()
+            if datos["Nombre"]:
+                self.modelo.añadir_usuario(datos["Nombre"], datos["Correo"])
+                self.actualizar_tabla()
+            else:
+                QMessageBox.warning(self.vista, "Error", "El nombre es obligatorio.")
+
+    def añadir_seccion_rapida(self):
+        dial = DialogoEntidad("Nueva Sección", ["Nombre"], self.vista)
+        if dial.exec():
+            nom = dial.obtener_datos()["Nombre"]
+            if nom:
+                self.modelo.añadir_seccion(nom)
+                self.cargar_filtros()
+            else:
+                QMessageBox.warning(self.vista, "Error", "El nombre es obligatorio.")
+
+    def gestionar_lugar_nuevo(self):
+        s_id = self.vista.cmb_seccion.currentData()
+        if s_id == 0:
+            return QMessageBox.warning(self.vista, "Aviso", "Primero selecciona una Sección.")
+        
+        dial = DialogoEntidad(f"Nuevo Lugar en {self.vista.cmb_seccion.currentText()}", ["Nombre"], self.vista)
+        if dial.exec():
+            nom = dial.obtener_datos()["Nombre"]
+            if nom:
+                if self.modelo.añadir_ubicacion(nom, s_id):
+                    self.actualizar_tabla()
+                else:
+                    QMessageBox.warning(self.vista, "Error", "El lugar ya existe en esta sección.")
+
+    def guardar_fila_especifica(self, fila):
+        try:
+            id_ubicacion = self.vista.tabla_inventario.cellWidget(fila, 1).currentData()
+            item_marca = self.vista.tabla_inventario.item(fila, 5)
+            item_modelo = self.vista.tabla_inventario.item(fila, 6)
+            
+            marca = item_marca.text().strip() if item_marca else ""
+            modelo = item_modelo.text().strip() if item_modelo else ""
+
+            if not id_ubicacion:
+                return QMessageBox.warning(self.vista, "Error", "Debes seleccionar un Lugar")
+            if not marca or not modelo:
+                return QMessageBox.warning(self.vista, "Error", "Marca y Modelo son obligatorios")
+
+            datos = {
+                "ubicacion_id": id_ubicacion,
+                "usuario_id": self.vista.tabla_inventario.cellWidget(fila, 2).currentData(),
+                "tipo_id": self.vista.tabla_inventario.cellWidget(fila, 4).currentData(),
+                "marca": marca,
+                "modelo": modelo,
+                "observaciones": self.vista.tabla_inventario.item(fila, 8).text() if self.vista.tabla_inventario.item(fila, 8) else "",
+            }
+            
+            if self.modelo.añadir_dispositivo_completo(datos):
+                self.actualizar_tabla()
+        except Exception as e:
+            QMessageBox.critical(self.vista, "Error", f"No se pudo guardar: {e}")
+
+    def eliminar_registro(self, d_id):
+        if QMessageBox.question(self.vista, "Borrar", "¿Eliminar dispositivo permanentemente?") == QMessageBox.Yes:
+            self.modelo.eliminar_registro(d_id)
+            self.actualizar_tabla()  
+
+    # Métodos para abrir las ventanas de gestión (para activarlos con botón derecho)
+    def abrir_gestion_secciones(self):
+        dial = VentanaGestion("Gestor de Secciones", "secciones", self.modelo, self.modelo.obtener_secciones, self.vista)
+        dial.exec()
+        self.cargar_filtros()
+
+    def abrir_gestion_lugares(self):
+        s_id = self.vista.cmb_seccion.currentData()
+        if s_id == 0: 
+            return QMessageBox.warning(self.vista, "Aviso", "Selecciona una sección específica primero para gestionar sus lugares.")
+        
+        # Abrimos la gestión filtrada por la sección que el usuario tiene seleccionada
+        dial = VentanaGestion(
+            f"Gestor de Lugares - {self.vista.cmb_seccion.currentText()}", 
+            "ubicaciones", 
+            self.modelo, 
+            lambda: self.modelo.obtener_ubicaciones_por_seccion(s_id), 
+            self.vista
+        )
+        dial.exec()
+        self.actualizar_tabla()
+
+    def abrir_gestion_usuarios(self):
+        dial = VentanaGestion("Gestor de Usuarios", "usuarios", self.modelo, self.modelo.obtener_usuarios, self.vista)
+        dial.exec()
+        self.actualizar_tabla() # Esto ya llama a la función correcta con todos los bloqueos
+
+    def activar_edicion_fila(self, fila, datos_originales):
+        """Convierte una fila estática en campos editables"""
+        d_id = datos_originales[0]
+        s_id = self.vista.cmb_seccion.currentData()
+        
+        # Si estamos en "Todas las secciones", necesitamos saber a qué sección pertenece el registro
+        # Para simplificar, asumimos que el usuario edita dentro de una sección filtrada.
+        if s_id == 0:
+            return QMessageBox.warning(self.vista, "Aviso", "Por favor, selecciona la sección específica arriba para editar sus registros.")
+
+        # 1. Combo Lugar
+        cb_lugar = QComboBox()
+        for id_l, nom in self.modelo.obtener_ubicaciones_por_seccion(s_id):
+            cb_lugar.addItem(nom, id_l)
+        # Seleccionar el actual (datos_originales[1] es el nombre del lugar)
+        index = cb_lugar.findText(datos_originales[1])
+        cb_lugar.setCurrentIndex(index)
+        self.vista.tabla_inventario.setCellWidget(fila, 1, cb_lugar)
+
+        # 2. Combo Usuario
+        cb_user = QComboBox()
+        cb_user.addItem("- Sin asignar -", None)
+
+        # Obtenemos los usuarios para tener los correos disponibles
+        usuarios_data = self.modelo.obtener_usuarios() 
+        for id_u, nom, mail in usuarios_data:
+            cb_user.addItem(nom, id_u)
+            # Guardamos el mail en un rol de datos interno para recuperarlo luego
+            cb_user.setItemData(cb_user.count()-1, mail, Qt.UserRole + 1)
+
+        def actualizar_mail_visual():
+            mail = cb_user.currentData(Qt.UserRole + 1)
+            item_m = QTableWidgetItem(str(mail) if mail else "")
+            item_m.setFlags(Qt.ItemIsEnabled) # Solo lectura
+            item_m.setTextAlignment(Qt.AlignCenter)
+            self.vista.tabla_inventario.setItem(fila, 3, item_m)
+
+        cb_user.currentIndexChanged.connect(actualizar_mail_visual)
+        # ------------------------------------------------
+        
+        index_u = cb_user.findText(datos_originales[2] if datos_originales[2] else "- Sin asignar -")
+        cb_user.setCurrentIndex(index_u)
+        self.vista.tabla_inventario.setCellWidget(fila, 2, cb_user)
+
+        # 3. Combo Tipo
+        cb_tipo = QComboBox()
+        for id_t, nom in self.modelo.obtener_tipos_dispositivo():
+            cb_tipo.addItem(nom, id_t)
+        index_t = cb_tipo.findText(datos_originales[4])
+        cb_tipo.setCurrentIndex(index_t)
+        self.vista.tabla_inventario.setCellWidget(fila, 4, cb_tipo)
+
+        # 4. Campos de texto (Marca, Modelo, Observaciones)
+        for col in [5, 6, 8]:
+            texto = datos_originales[col]
+            item = QTableWidgetItem(str(texto) if texto else "")
+            self.vista.tabla_inventario.setItem(fila, col, item)
+
+        item_correo = QTableWidgetItem(str(datos_originales[3]))
+        item_correo.setFlags(Qt.ItemIsEnabled) # Solo habilitado para lectura
+        self.vista.tabla_inventario.setItem(fila, 3, item_correo)
+
+        # --- Usar DatePicker en lugar de QLineEdit ---
+        fecha_db = datos_originales[7] if datos_originales[7] else "2026-01-01"
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDisplayFormat("yyyy-MM-dd") # Formato visual que prefieres
+        # Convertimos el texto de la DB a objeto QDate para el widget
+        date_edit.setDate(QDate.fromString(fecha_db, "yyyy-MM-dd"))
+        self.vista.tabla_inventario.setCellWidget(fila, 7, date_edit)
+
+        # 5. Cambiar botones de acción a Guardar/Cancelar
+        panel = QWidget()
+        ly = QHBoxLayout(panel)
+        ly.setContentsMargins(0, 0, 0, 0)
+        btn_save = QPushButton("💾")
+        btn_save.setFixedSize(30, 25)
+        btn_cancel = QPushButton("🔙")
+        btn_cancel.setFixedSize(30, 25)
+
+        ly.addWidget(btn_save)
+        ly.addWidget(btn_cancel)
+
+        btn_save.clicked.connect(lambda: self.guardar_cambios_edicion(fila, d_id))
+        btn_cancel.clicked.connect(self.actualizar_tabla)
+        self.vista.tabla_inventario.setCellWidget(fila, 9, panel)
+
+    def guardar_cambios_edicion(self, fila, d_id):
+        try:
+            # Recuperamos los widgets de la fila
+            cb_tipo = self.vista.tabla_inventario.cellWidget(fila, 4)
+            txt_marca = self.vista.tabla_inventario.cellWidget(fila, 5)
+            txt_modelo = self.vista.tabla_inventario.cellWidget(fila, 6)
+            
+            # --- AQUÍ CAPTURAMOS LA FECHA DEL DATEPICKER ---
+            widget_fecha = self.vista.tabla_inventario.cellWidget(fila, 7)
+            fecha_para_db = widget_fecha.date().toString("yyyy-MM-dd") 
+
+            cb_lugar = self.vista.tabla_inventario.cellWidget(fila, 1)
+            cb_usuario = self.vista.tabla_inventario.cellWidget(fila, 2)
+            txt_obs = self.vista.tabla_inventario.cellWidget(fila, 8)
+
+            datos = {
+                'tipo_id': cb_tipo.currentData(),
+                'marca': txt_marca.text(),
+                'modelo': txt_modelo.text(),
+                'ubicacion_id': cb_lugar.currentData(),
+                'usuario_id': cb_usuario.currentData(),
+                'fecha': fecha_para_db,  # <--- Pasamos la fecha formateada
+                'observaciones': txt_obs.text()
+            }
+
+            if self.modelo.actualizar_dispositivo_completo(d_id, datos):
+                self.actualizar_tabla()
+        except Exception as e:
+            print(f"Error al guardar: {e}")
+
+    def importar_datos(self):
+        from PySide6.QtWidgets import QFileDialog, QProgressDialog
+        ruta, _ = QFileDialog.getOpenFileName(self.vista, "Seleccionar CSV", "", "Archivos CSV (*.csv)")
+        
+        if ruta:
+            progreso = QProgressDialog("Importando datos...", "Cancelar", 0, 100, self.vista)
+            progreso.setWindowModality(Qt.WindowModal)
+            progreso.show()
+
+            def actualizar_barra(actual, total):
+                if total > 0:
+                    progreso.setValue(min(int((actual / total) * 100), 100))
+                QApplication.processEvents()
+
+            exito = self.modelo.importar_desde_csv(ruta, actualizar_barra)
+            progreso.close() 
+
+            if exito:
+                self.cargar_filtros() # Actualiza los combos de Secciones y Usuarios
+                self.actualizar_tabla() # Dibuja los nuevos registros
+                QMessageBox.information(self.vista, "Éxito", "Importación completada correctamente.")
+            else:
+                QMessageBox.critical(self.vista, "Error", "Error al leer el archivo. Revisa los nombres de las columnas.")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    modelo = InventarioModel()
+    vista = InventarioVista()
+    ctrl = InventarioControlador(modelo, vista)
+    vista.show()
+    sys.exit(app.exec())

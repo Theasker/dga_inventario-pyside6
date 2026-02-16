@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+dist/
+build/
+*.spec
+
+# --- Base de Datos (Muy importante) ---
+# No subas la base de datos si contiene datos reales/sensibles
+# Si quieres subir la estructura vacía, ignora solo el archivo .db
+*.db
+*.sqlite3
+
+# --- Recursos y Ejecutables ---
+# Ignora archivos generados por PyInstaller
+*.exe
+*.bin
+*.app
+*.csv
+
+# --- IDEs y Editores ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Sistema ---
+Thumbs.db
+.DS_Store
+temp*
+
+# --- Informes Generados ---
+# No queremos subir los PDFs que generes de prueba
+*.pdf
