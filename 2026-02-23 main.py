@@ -3,7 +3,6 @@ import sys
 import os
 import sqlite3
 import unicodedata
-import csv
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -145,7 +144,7 @@ class InventarioModel:
             query += " AND s.id = ?"
             params.append(seccion_id)
             
-        query += " ORDER BY l.nombre ASC"
+        query += " ORDER BY d.id DESC"
         try:
             return conn.execute(query, params).fetchall()
         finally:
@@ -277,6 +276,60 @@ class InventarioModel:
         except sqlite3.Error:
             return False
 
+    def importar_desde_csv(self):
+        ruta, _ = QFileDialog.getOpenFileName(
+            self.vista, "Importar Inventario", "", "CSV Files (*.csv)"
+        )
+        if not ruta:
+            return
+
+        try:
+            with open(ruta, newline='', encoding='utf-8') as f:
+                lector = csv.reader(f, delimiter=';')
+                try:
+                    next(lector)  # Saltar cabecera
+                except StopIteration:
+                    return
+
+                contador = 0
+                for i, fila in enumerate(lector, 1):
+                    try:
+                        if len(fila) < 9:
+                            continue
+
+                        # Extracción de datos según tu CSV
+                        sede_txt    = fila[0].strip()
+                        usuario_txt = fila[1].strip()
+                        tipo_txt    = fila[4].strip()
+                        marca       = fila[5].strip()
+                        modelo_txt  = fila[6].strip()
+                        sn_txt      = fila[7].strip()
+                        fecha_txt   = fila[8].strip()
+
+                        # Obtener o Crear IDs en la base de datos
+                        id_ubi  = self.modelo.obtener_o_crear_ubicacion(sede_txt)
+                        id_usu  = self.modelo.obtener_o_crear_usuario(usuario_txt)
+                        id_tipo = self.modelo.obtener_o_crear_tipo(tipo_txt)
+
+                        # Insertar el dispositivo final
+                        obs = f"S/N: {sn_txt}"
+                        exito = self.modelo.insertar_dispositivo(
+                            id_tipo, marca, modelo_txt, id_ubi, id_usu, fecha_txt, obs
+                        )
+                        
+                        if exito:
+                            contador += 1
+                            
+                    except Exception as row_err:
+                        print(f"Error procesando fila {i}: {row_err}")
+                        continue
+
+                self.actualizar_tabla()
+                QMessageBox.information(self.vista, "Éxito", f"Se han importado {contador} registros.")
+
+        except Exception as e:
+            QMessageBox.critical(self.vista, "Error Crítico", f"No se pudo leer el archivo: {str(e)}")
+
     def obtener_todas_las_ubicaciones(self):
         query = """
             SELECT u.id, u.nombre, s.nombre 
@@ -334,20 +387,18 @@ class InventarioModel:
             conn.close()
 
     def insertar_tipo(self, nombre):
-        query = "INSERT INTO tipos_dispositivo (nombre) VALUES (?)"
-        with self.conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, (nombre,))
-            conn.commit()
-            return cursor.lastrowid
+        query = "INSERT INTO tipos (nombre) VALUES (?)"
+        cursor = self.db.conn.cursor()
+        cursor.execute(query, (nombre,))
+        self.db.conn.commit()
+        return cursor.lastrowid
 
     def insertar_ubicacion(self, nombre):
         query = "INSERT INTO ubicaciones (nombre) VALUES (?)"
-        with self.conectar() as conn:
-            cursor = conn.cursor()
-            cursor.execute(query, (nombre,))
-            conn.commit()
-            return cursor.lastrowid
+        cursor = self.db.conn.cursor()
+        cursor.execute(query, (nombre,))
+        self.db.conn.commit()
+        return cursor.lastrowid
 
     def obtener_o_crear_seccion(self, nombre, conn=None):
         if not nombre: nombre = "General"
@@ -418,6 +469,7 @@ class InventarioVista(QMainWindow):
         icon_path = resource_path("logo_servicio.png")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+        self.setWindowIcon(QIcon(resource_path("logo_servicio.png")))
         
         self._central_widget = QWidget()
         self.setCentralWidget(self._central_widget)
@@ -806,6 +858,24 @@ class InventarioControlador:
         total = self.vista.tabla_inventario.rowCount()
         self.vista.lbl_contador.setText(f"Dispositivos visualizados: {total}")
 
+    def filtrar_datos(self):
+        termino = remover_tildes(self.vista.txt_buscar.text())
+        # Desactivamos el refresco visual para ganar velocidad punta
+        self.vista.tabla_inventario.setUpdatesEnabled(False)
+        
+        try:
+            for i in range(self.vista.tabla_inventario.rowCount()):
+                match = False
+                for j in range(self.vista.tabla_inventario.columnCount()):
+                    item = self.vista.tabla_inventario.item(i, j)
+                    if item and termino in remover_tildes(item.text()):
+                        match = True
+                        break
+                self.vista.tabla_inventario.setRowHidden(i, not match)
+        finally:
+            # Reactivamos y actualizamos contador
+            self.vista.tabla_inventario.setUpdatesEnabled(True)
+            self.actualizar_contador()
 
     def _insertar_botones_accion(self, fila, datos_fila):
         panel = QWidget()
@@ -943,16 +1013,12 @@ class InventarioControlador:
             if not marca or not modelo:
                 return QMessageBox.warning(self.vista, "Error", "Marca y Modelo son obligatorios")
 
-            widget_fecha = self.vista.tabla_inventario.cellWidget(fila, 7)
-            fecha_para_db = widget_fecha.date().toString("yyyy-MM-dd")
-
             datos = {
                 "ubicacion_id": id_ubicacion,
                 "usuario_id": self.vista.tabla_inventario.cellWidget(fila, 2).currentData(),
                 "tipo_id": self.vista.tabla_inventario.cellWidget(fila, 4).currentData(),
                 "marca": marca,
                 "modelo": modelo,
-                "fecha": fecha_para_db,
                 "observaciones": self.vista.tabla_inventario.item(fila, 8).text() if self.vista.tabla_inventario.item(fila, 8) else "",
             }
             
@@ -1064,10 +1130,7 @@ class InventarioControlador:
         date_edit.setCalendarPopup(True)
         date_edit.setDisplayFormat("yyyy-MM-dd") # Formato visual que prefieres
         # Convertimos el texto de la DB a objeto QDate para el widget
-        qdate = QDate.fromString(fecha_db, "yyyy-MM-dd")
-        if not qdate.isValid():
-            qdate = QDate.currentDate()
-        date_edit.setDate(qdate)
+        date_edit.setDate(QDate.fromString(fecha_db, "yyyy-MM-dd"))
         self.vista.tabla_inventario.setCellWidget(fila, 7, date_edit)
 
         # 5. Cambiar botones de acción a Guardar/Cancelar
@@ -1119,6 +1182,7 @@ class InventarioControlador:
         ruta, _ = QFileDialog.getOpenFileName(self.vista, "Seleccionar CSV", "", "CSV Files (*.csv)")
         if not ruta: return
 
+        import csv
         try:
             with open(ruta, newline='', encoding='utf-8-sig') as f:
                 total_filas = sum(1 for _ in f) - 1
