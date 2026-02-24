@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QFrame
 )
-from PySide6.QtCore import Qt, QDate, QObject
+from PySide6.QtCore import Qt, QDate
 
 def remover_tildes(texto):
     if texto is None: return ""
@@ -148,21 +148,6 @@ class InventarioModel:
         query += " ORDER BY l.nombre ASC"
         try:
             return conn.execute(query, params).fetchall()
-        finally:
-            conn.close()
-
-    def obtener_dispositivo_por_id(self, d_id):
-        conn = self.conectar()
-        query = '''SELECT d.id, l.nombre, u.nombre, u.correo, t.nombre, d.marca, d.modelo, d.fecha_registro, d.observaciones, s.id
-                   FROM dispositivos d
-                   JOIN asignaciones a ON d.id = a.dispositivo_id
-                   JOIN ubicaciones l ON a.ubicacion_id = l.id
-                   JOIN tipos_dispositivo t ON d.tipo_dispositivo_id = t.id
-                   LEFT JOIN usuarios u ON a.usuario_id = u.id
-                   JOIN secciones s ON l.seccion_id = s.id
-                   WHERE d.id = ?'''
-        try:
-            return conn.execute(query, (d_id,)).fetchone()
         finally:
             conn.close()
 
@@ -629,16 +614,6 @@ class VentanaGestion(QDialog):
         self.funcion_datos = funcion_datos
         
         layout = QVBoxLayout(self)
-        
-        # --- Cabecera con botón añadir ---
-        ly_header = QHBoxLayout()
-        self.btn_nuevo = QPushButton("➕ Añadir Nuevo")
-        self.btn_nuevo.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 8px;")
-        self.btn_nuevo.clicked.connect(self.añadir_nuevo)
-        ly_header.addStretch()
-        ly_header.addWidget(self.btn_nuevo)
-        layout.addLayout(ly_header)
-
         self.tabla = QTableWidget()
         
         # El número de columnas inicial se ajustará en cargar_datos
@@ -745,48 +720,6 @@ class VentanaGestion(QDialog):
                 QMessageBox.critical(self, "Error", "No se puede borrar: El registro está siendo usado en el inventario.")
             self.cargar_datos()
 
-    def añadir_nuevo(self):
-        if self.tabla_db == "secciones":
-            dial = DialogoEntidad("Nueva Sección", ["Nombre"], self)
-            if dial.exec():
-                nom = dial.obtener_datos()["Nombre"]
-                if nom: self.modelo.añadir_seccion(nom)
-        elif self.tabla_db == "usuarios":
-            dial = DialogoEntidad("Nueva Persona", ["Nombre", "Correo"], self)
-            if dial.exec():
-                datos = dial.obtener_datos()
-                if datos["Nombre"]: self.modelo.añadir_usuario(datos["Nombre"], datos["Correo"])
-        elif self.tabla_db == "ubicaciones":
-            # Para lugares necesitamos saber en qué sección. 
-            # Usamos el DialogoEntidad pero necesitamos un combo.
-            # Para simplificar y mantener consistencia, preguntamos nombre y 
-            # usamos la sección que el usuario tenga seleccionada en la vista principal
-            # o mostramos un diálogo más complejo.
-            dial = DialogoEntidad("Nuevo Lugar", ["Nombre"], self)
-            if dial.exec():
-                nom = dial.obtener_datos()["Nombre"]
-                if nom:
-                    # Intentamos obtener la sección desde el parent (InventarioVista)
-                    main_window = self.parent()
-                    s_id = 0
-                    if main_window and hasattr(main_window, 'cmb_seccion'):
-                        s_id = main_window.cmb_seccion.currentData()
-                    
-                    if s_id == 0:
-                        QMessageBox.warning(self, "Aviso", "Selecciona una sección en la ventana principal antes de añadir un lugar.")
-                        return
-
-                    self.modelo.añadir_ubicacion(nom, s_id)
-        
-        self.cargar_datos()
-        # Si el parent es la vista principal, refrescamos sus combos
-        main_window = self.parent()
-        if main_window and hasattr(main_window, 'controller'):
-             # Si el controlador está accesible, refrescamos. 
-             # Pero VentanaGestion no tiene acceso directo al controlador usualmente.
-             # En este script, el controlador se guarda en algun sitio?
-             pass
-
 # --- VISTA. Diálogo Univsersal ---
 class DialogoEntidad(QDialog):
     def __init__(self, titulo, campos, parent=None):
@@ -812,9 +745,8 @@ class DialogoEntidad(QDialog):
         return {nombre: widget.text().strip() for nombre, widget in self.inputs.items()}
 
 # --- CONTROLADOR ---
-class InventarioControlador(QObject):
+class InventarioControlador:
     def __init__(self, modelo, vista):
-        super().__init__()
         self.modelo = modelo
         self.vista = vista
         self.cargar_filtros()
@@ -1176,29 +1108,14 @@ class InventarioControlador(QObject):
         ly.addWidget(btn_save)
         ly.addWidget(btn_cancel)
 
-        # Usamos d_id para asegurar que guardamos el registro correcto
-        btn_save.clicked.connect(lambda _, b=btn_save, d=d_id: self.guardar_cambios_edicion(b, d))
+        btn_save.clicked.connect(lambda: self.guardar_cambios_edicion(fila, d_id))
         btn_cancel.clicked.connect(self.actualizar_tabla)
         self.vista.tabla_inventario.setCellWidget(fila, 9, panel)
 
-    def guardar_cambios_edicion(self, boton, d_id):
+    def guardar_cambios_edicion(self, fila, d_id):
         try:
-            # Subimos niveles hasta encontrar el widget contenedor que pusimos en la celda
-            parent_widget = boton.parentWidget()
-            # Buscamos en qué fila está ese widget
-            fila = -1
-            for r in range(self.vista.tabla_inventario.rowCount()):
-                if self.vista.tabla_inventario.cellWidget(r, 9) == parent_widget:
-                    fila = r
-                    break
-            
-            if fila == -1: return
-
-            # Obtener datos de los widgets de esa fila
+            # CORREGIDO: Obtener texto de items, no de widgets (que no existen en esas columnas)
             tipo_id = self.vista.tabla_inventario.cellWidget(fila, 4).currentData()
-            
-            # Para marca, modelo y observaciones, si son QTableWidgetItem usamos .text()
-            # Pero ojo, en edicion_fila se crearon como items de texto
             marca = self.vista.tabla_inventario.item(fila, 5).text()
             modelo = self.vista.tabla_inventario.item(fila, 6).text()
             observaciones = self.vista.tabla_inventario.item(fila, 8).text()
@@ -1220,31 +1137,9 @@ class InventarioControlador(QObject):
             }
 
             if self.modelo.actualizar_dispositivo_completo(d_id, datos):
-                # Refrescamos SOLO esta fila para no perder otras ediciones abiertas
-                self.refrescar_fila_especifica(fila, d_id)
+                self.actualizar_tabla()
         except Exception as e:
             QMessageBox.critical(self.vista, "Error", f"Error al guardar: {e}")
-
-    def refrescar_fila_especifica(self, fila, d_id):
-        """Actualiza una única fila con los datos actuales de la DB"""
-        self.vista.tabla_inventario.blockSignals(True)
-        r_data = self.modelo.obtener_dispositivo_por_id(d_id)
-        if r_data:
-            # Limpiamos los widgets de la fila (vuelven a ser items normales)
-            # setCellWidget(fila, col, None) quita el widget
-            for col in [1, 2, 4, 7, 9]:
-                self.vista.tabla_inventario.setCellWidget(fila, col, None)
-
-            for c_idx in range(9):
-                val = r_data[c_idx]
-                item = QTableWidgetItem(str(val) if val is not None else "")
-                item.setTextAlignment(Qt.AlignCenter)
-                if c_idx == 1:
-                    item.setData(Qt.UserRole, r_data)
-                self.vista.tabla_inventario.setItem(fila, c_idx, item)
-
-            self._insertar_botones_accion(fila, r_data)
-        self.vista.tabla_inventario.blockSignals(False)
 
     def importar_datos(self):
         ruta, _ = QFileDialog.getOpenFileName(self.vista, "Seleccionar CSV", "", "CSV Files (*.csv)")

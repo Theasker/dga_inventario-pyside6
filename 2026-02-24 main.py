@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QDateEdit,
     QFrame
 )
-from PySide6.QtCore import Qt, QDate, QObject
+from PySide6.QtCore import Qt, QDate
 
 def remover_tildes(texto):
     if texto is None: return ""
@@ -126,7 +126,7 @@ class InventarioModel:
         # Registramos la función para que SQLite entienda 'BUSCAR'
         conn.create_function("BUSCAR", 1, remover_tildes)
         
-        query = '''SELECT d.id, l.nombre, u.nombre, u.correo, t.nombre, d.marca, d.modelo, d.fecha_registro, d.observaciones, s.id
+        query = '''SELECT d.id, l.nombre, u.nombre, u.correo, t.nombre, d.marca, d.modelo, d.fecha_registro, d.observaciones
                    FROM dispositivos d
                    JOIN asignaciones a ON d.id = a.dispositivo_id
                    JOIN ubicaciones l ON a.ubicacion_id = l.id
@@ -148,21 +148,6 @@ class InventarioModel:
         query += " ORDER BY l.nombre ASC"
         try:
             return conn.execute(query, params).fetchall()
-        finally:
-            conn.close()
-
-    def obtener_dispositivo_por_id(self, d_id):
-        conn = self.conectar()
-        query = '''SELECT d.id, l.nombre, u.nombre, u.correo, t.nombre, d.marca, d.modelo, d.fecha_registro, d.observaciones, s.id
-                   FROM dispositivos d
-                   JOIN asignaciones a ON d.id = a.dispositivo_id
-                   JOIN ubicaciones l ON a.ubicacion_id = l.id
-                   JOIN tipos_dispositivo t ON d.tipo_dispositivo_id = t.id
-                   LEFT JOIN usuarios u ON a.usuario_id = u.id
-                   JOIN secciones s ON l.seccion_id = s.id
-                   WHERE d.id = ?'''
-        try:
-            return conn.execute(query, (d_id,)).fetchone()
         finally:
             conn.close()
 
@@ -427,7 +412,7 @@ class InventarioVista(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Inventario del Servicio de Información y Documentación")
-        self.resize(1450, 850)
+        self.resize(1200, 800)
 
         # Carga del icono usando la función de ruta segura
         icon_path = resource_path("logo_servicio.png")
@@ -506,15 +491,7 @@ class InventarioVista(QMainWindow):
         # Permitir que las columnas sean redimensionables interactivamente
         header = self.tabla_inventario.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
-        # Ajustar anchos iniciales razonables
-        self.tabla_inventario.setColumnWidth(1, 150) # Lugar
-        self.tabla_inventario.setColumnWidth(2, 180) # Usuario
-        self.tabla_inventario.setColumnWidth(3, 180) # Correo
-        self.tabla_inventario.setColumnWidth(4, 120) # Tipo
-        self.tabla_inventario.setColumnWidth(5, 100) # Marca
-        self.tabla_inventario.setColumnWidth(6, 120) # Modelo
-        self.tabla_inventario.setColumnWidth(7, 100) # Fecha
-        
+        header.setSectionResizeMode(2, QHeaderView.Stretch)  # Estirar "Usuario"
         header.setSectionResizeMode(8, QHeaderView.Stretch)  # Estirar "Observaciones"
         # FIN creación de tabla -----------------------
 
@@ -629,16 +606,6 @@ class VentanaGestion(QDialog):
         self.funcion_datos = funcion_datos
         
         layout = QVBoxLayout(self)
-        
-        # --- Cabecera con botón añadir ---
-        ly_header = QHBoxLayout()
-        self.btn_nuevo = QPushButton("➕ Añadir Nuevo")
-        self.btn_nuevo.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; padding: 8px;")
-        self.btn_nuevo.clicked.connect(self.añadir_nuevo)
-        ly_header.addStretch()
-        ly_header.addWidget(self.btn_nuevo)
-        layout.addLayout(ly_header)
-
         self.tabla = QTableWidget()
         
         # El número de columnas inicial se ajustará en cargar_datos
@@ -745,48 +712,6 @@ class VentanaGestion(QDialog):
                 QMessageBox.critical(self, "Error", "No se puede borrar: El registro está siendo usado en el inventario.")
             self.cargar_datos()
 
-    def añadir_nuevo(self):
-        if self.tabla_db == "secciones":
-            dial = DialogoEntidad("Nueva Sección", ["Nombre"], self)
-            if dial.exec():
-                nom = dial.obtener_datos()["Nombre"]
-                if nom: self.modelo.añadir_seccion(nom)
-        elif self.tabla_db == "usuarios":
-            dial = DialogoEntidad("Nueva Persona", ["Nombre", "Correo"], self)
-            if dial.exec():
-                datos = dial.obtener_datos()
-                if datos["Nombre"]: self.modelo.añadir_usuario(datos["Nombre"], datos["Correo"])
-        elif self.tabla_db == "ubicaciones":
-            # Para lugares necesitamos saber en qué sección. 
-            # Usamos el DialogoEntidad pero necesitamos un combo.
-            # Para simplificar y mantener consistencia, preguntamos nombre y 
-            # usamos la sección que el usuario tenga seleccionada en la vista principal
-            # o mostramos un diálogo más complejo.
-            dial = DialogoEntidad("Nuevo Lugar", ["Nombre"], self)
-            if dial.exec():
-                nom = dial.obtener_datos()["Nombre"]
-                if nom:
-                    # Intentamos obtener la sección desde el parent (InventarioVista)
-                    main_window = self.parent()
-                    s_id = 0
-                    if main_window and hasattr(main_window, 'cmb_seccion'):
-                        s_id = main_window.cmb_seccion.currentData()
-                    
-                    if s_id == 0:
-                        QMessageBox.warning(self, "Aviso", "Selecciona una sección en la ventana principal antes de añadir un lugar.")
-                        return
-
-                    self.modelo.añadir_ubicacion(nom, s_id)
-        
-        self.cargar_datos()
-        # Si el parent es la vista principal, refrescamos sus combos
-        main_window = self.parent()
-        if main_window and hasattr(main_window, 'controller'):
-             # Si el controlador está accesible, refrescamos. 
-             # Pero VentanaGestion no tiene acceso directo al controlador usualmente.
-             # En este script, el controlador se guarda en algun sitio?
-             pass
-
 # --- VISTA. Diálogo Univsersal ---
 class DialogoEntidad(QDialog):
     def __init__(self, titulo, campos, parent=None):
@@ -812,9 +737,8 @@ class DialogoEntidad(QDialog):
         return {nombre: widget.text().strip() for nombre, widget in self.inputs.items()}
 
 # --- CONTROLADOR ---
-class InventarioControlador(QObject):
+class InventarioControlador:
     def __init__(self, modelo, vista):
-        super().__init__()
         self.modelo = modelo
         self.vista = vista
         self.cargar_filtros()
@@ -833,7 +757,6 @@ class InventarioControlador(QObject):
         self.vista.cmb_seccion.currentIndexChanged.connect(self.actualizar_tabla)
         self.vista.btn_importar.clicked.connect(self.importar_datos)
         self.vista.btn_pdf.clicked.connect(self.generar_informe_pdf)
-        self.vista.tabla_inventario.cellDoubleClicked.connect(self.on_double_click)
         
         # ¿menús contextuales o botones de gestión aquí?        
         self.vista.cmb_seccion.setToolTip("Doble clic para gestionar secciones")
@@ -871,14 +794,10 @@ class InventarioControlador(QObject):
                 val = r_data[c_idx]
                 item = QTableWidgetItem(str(val) if val is not None else "")
                 item.setTextAlignment(Qt.AlignCenter)
-                # Guardamos los datos completos en el primer item de la fila para recuperarlos en el doble clic
-                if c_idx == 1: # Usamos la columna Lugar que siempre es visible
-                    item.setData(Qt.UserRole, r_data)
                 self.vista.tabla_inventario.setItem(r_idx, c_idx, item)
 
             self._insertar_botones_accion(r_idx, r_data)
 
-        self.vista.tabla_inventario.resizeColumnsToContents()
         self.vista.tabla_inventario.blockSignals(False)
         # CORREGIDO: Llamada al contador corregida
         self.actualizar_contador_dispositivos()
@@ -886,17 +805,6 @@ class InventarioControlador(QObject):
     def actualizar_contador_dispositivos(self):
         total = self.vista.tabla_inventario.rowCount()
         self.vista.lbl_contador.setText(f"Dispositivos visualizados: {total}")
-
-    def on_double_click(self, row, column):
-        # Evitamos disparar si se hace doble clic en la columna de acciones (9)
-        if column == 9:
-            return
-            
-        item = self.vista.tabla_inventario.item(row, 1) # Donde guardamos los datos
-        if item:
-            datos = item.data(Qt.UserRole)
-            if datos:
-                self.activar_edicion_fila(row, datos)
 
 
     def _insertar_botones_accion(self, fila, datos_fila):
@@ -1088,24 +996,22 @@ class InventarioControlador(QObject):
     def activar_edicion_fila(self, fila, datos_originales):
         """Convierte una fila estática en campos editables"""
         d_id = datos_originales[0]
-        # Obtenemos la seccion_id real del registro (columna 10, indice 9 de la query)
-        s_id_registro = datos_originales[9] if len(datos_originales) > 9 else 0
+        s_id = self.vista.cmb_seccion.currentData()
         
-        # 1. Combo Lugar (Filtrado por la sección del registro)
+        # Si estamos en "Todas las secciones", necesitamos saber a qué sección pertenece el registro
+        # Para simplificar, asumimos que el usuario edita dentro de una sección filtrada.
+        if s_id == 0:
+            return QMessageBox.warning(self.vista, "Aviso", "Por favor, selecciona la sección específica arriba para editar sus registros.")
+
+        # 1. Combo Lugar
         cb_lugar = QComboBox()
-        cb_lugar.setMinimumWidth(200)
-        
-        # Cargamos SOLA las ubicaciones de la sección a la que pertenece el dispositivo
-        if s_id_registro:
-            ubicaciones = self.modelo.obtener_ubicaciones_por_seccion(s_id_registro)
-            for u_id, nombre_ub in ubicaciones:
-                cb_lugar.addItem(nombre_ub, u_id)
-        else:
-            # Fallback por si no hay s_id (no debería pasar)
-            cb_lugar.addItem(datos_originales[1], None)
+        ubicaciones = self.modelo.obtener_todas_las_ubicaciones() # <--- Nuevo método necesario
+        for u_id, nombre_ub, nombre_sec in ubicaciones:
+            # Mostramos "Ubicación (Sección)" para que el usuario sepa a dónde lo mueve
+            cb_lugar.addItem(f"{nombre_ub} ({nombre_sec})", u_id)
         
         # Seleccionamos la que ya tenía
-        indice = cb_lugar.findText(datos_originales[1])
+        indice = cb_lugar.findText(datos_originales[1], Qt.MatchContains)
         cb_lugar.setCurrentIndex(indice)
         self.vista.tabla_inventario.setCellWidget(fila, 1, cb_lugar)
 
@@ -1176,29 +1082,14 @@ class InventarioControlador(QObject):
         ly.addWidget(btn_save)
         ly.addWidget(btn_cancel)
 
-        # Usamos d_id para asegurar que guardamos el registro correcto
-        btn_save.clicked.connect(lambda _, b=btn_save, d=d_id: self.guardar_cambios_edicion(b, d))
+        btn_save.clicked.connect(lambda: self.guardar_cambios_edicion(fila, d_id))
         btn_cancel.clicked.connect(self.actualizar_tabla)
         self.vista.tabla_inventario.setCellWidget(fila, 9, panel)
 
-    def guardar_cambios_edicion(self, boton, d_id):
+    def guardar_cambios_edicion(self, fila, d_id):
         try:
-            # Subimos niveles hasta encontrar el widget contenedor que pusimos en la celda
-            parent_widget = boton.parentWidget()
-            # Buscamos en qué fila está ese widget
-            fila = -1
-            for r in range(self.vista.tabla_inventario.rowCount()):
-                if self.vista.tabla_inventario.cellWidget(r, 9) == parent_widget:
-                    fila = r
-                    break
-            
-            if fila == -1: return
-
-            # Obtener datos de los widgets de esa fila
+            # CORREGIDO: Obtener texto de items, no de widgets (que no existen en esas columnas)
             tipo_id = self.vista.tabla_inventario.cellWidget(fila, 4).currentData()
-            
-            # Para marca, modelo y observaciones, si son QTableWidgetItem usamos .text()
-            # Pero ojo, en edicion_fila se crearon como items de texto
             marca = self.vista.tabla_inventario.item(fila, 5).text()
             modelo = self.vista.tabla_inventario.item(fila, 6).text()
             observaciones = self.vista.tabla_inventario.item(fila, 8).text()
@@ -1220,31 +1111,9 @@ class InventarioControlador(QObject):
             }
 
             if self.modelo.actualizar_dispositivo_completo(d_id, datos):
-                # Refrescamos SOLO esta fila para no perder otras ediciones abiertas
-                self.refrescar_fila_especifica(fila, d_id)
+                self.actualizar_tabla()
         except Exception as e:
             QMessageBox.critical(self.vista, "Error", f"Error al guardar: {e}")
-
-    def refrescar_fila_especifica(self, fila, d_id):
-        """Actualiza una única fila con los datos actuales de la DB"""
-        self.vista.tabla_inventario.blockSignals(True)
-        r_data = self.modelo.obtener_dispositivo_por_id(d_id)
-        if r_data:
-            # Limpiamos los widgets de la fila (vuelven a ser items normales)
-            # setCellWidget(fila, col, None) quita el widget
-            for col in [1, 2, 4, 7, 9]:
-                self.vista.tabla_inventario.setCellWidget(fila, col, None)
-
-            for c_idx in range(9):
-                val = r_data[c_idx]
-                item = QTableWidgetItem(str(val) if val is not None else "")
-                item.setTextAlignment(Qt.AlignCenter)
-                if c_idx == 1:
-                    item.setData(Qt.UserRole, r_data)
-                self.vista.tabla_inventario.setItem(fila, c_idx, item)
-
-            self._insertar_botones_accion(fila, r_data)
-        self.vista.tabla_inventario.blockSignals(False)
 
     def importar_datos(self):
         ruta, _ = QFileDialog.getOpenFileName(self.vista, "Seleccionar CSV", "", "CSV Files (*.csv)")
@@ -1315,137 +1184,137 @@ class InventarioControlador(QObject):
                 self.vista.progreso.hide()
             QMessageBox.critical(self.vista, "Error", f"Fallo en importación: {str(e)}")
 
-
     def generar_informe_pdf(self):
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.lib.units import cm
+
+        doc = None
         try:
             ruta, _ = QFileDialog.getSaveFileName(self.vista, "Guardar Informe", "", "PDF Files (*.pdf)")
             if not ruta: return
 
             datos = self.modelo.obtener_datos_informe_agrupado()
             if not datos:
-                return QMessageBox.warning(self.vista, "Aviso", "No hay datos para exportar.")
+                QMessageBox.warning(self.vista, "Aviso", "No hay datos para exportar.")
+                return
 
-            exportar_pdf_compacto(ruta, datos)
+            doc = SimpleDocTemplate(
+                ruta, 
+                pagesize=landscape(A4),
+                rightMargin=1.5*cm, leftMargin=1.5*cm, 
+                topMargin=1.5*cm, bottomMargin=1.5*cm
+            )
+            
+            elementos = []
+            estilos = getSampleStyleSheet()
+            
+            # --- ESTILOS PERSONALIZADOS ---
+            estilo_titulo = ParagraphStyle('DocTitle', parent=estilos['Title'], fontSize=22, alignment=0, textColor=colors.HexColor("#2c3e50"))
+            estilo_seccion = ParagraphStyle('Sec', parent=estilos['Heading1'], fontSize=16, textColor=colors.HexColor("#27ae60"), spaceBefore=15, fontName='Helvetica-Bold')
+            estilo_lugar = ParagraphStyle('Lug', parent=estilos['Heading2'], fontSize=12, textColor=colors.HexColor("#2980b9"), spaceBefore=10)
+            estilo_cabecera = ParagraphStyle('Cab', parent=estilos['Normal'], fontSize=9, fontName='Helvetica-Bold', textColor=colors.whitesmoke, alignment=1)
+            estilo_celda = ParagraphStyle('Cel', parent=estilos['Normal'], fontSize=9, alignment=1)
+
+            def añadir_pie_pagina(canvas, document):
+                canvas.saveState()
+                fecha_hoy = QDate.currentDate().toString('dd/MM/yyyy')
+                texto_pie = f"Página {document.page} - Generado el {fecha_hoy} - Inventario Tecnológico"
+                canvas.setFont('Helvetica', 9)
+                canvas.drawCentredString(landscape(A4)[0] / 2, 1 * cm, texto_pie)
+                canvas.restoreState()
+
+            # --- ENCABEZADO (TÍTULO + LOGO) ---
+            titulo_parrafo = Paragraph("INVENTARIO DE DISPOSITIVOS TECNOLÓGICOS", estilo_titulo)
+            try:
+                path_logo = resource_path("logo_servicio.png")
+                ancho_logo = 4.5 * cm
+                alto_logo = (484 / 1240) * ancho_logo
+                logo_img = Image(path_logo, width=ancho_logo, height=alto_logo)
+                
+                header_table = Table([[titulo_parrafo, logo_img]], colWidths=[20*cm, 6.7*cm])
+                header_table.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                ]))
+                elementos.append(header_table)
+            except:
+                elementos.append(titulo_parrafo)
+
+            elementos.append(Spacer(1, 10))
+
+            # --- LÓGICA DE AGRUPACIÓN ---
+            seccion_actual = None
+            lugar_actual = None
+            tabla_data = []
+
+            def volcar_tabla_al_pdf(data_list):
+                if len(data_list) > 1: # Solo si hay algo más que la cabecera
+                    # Anchos: Tipo(3), Marca(3), Modelo(4), Usuario(7.5), Fecha(2.5), Obs(7.2) = 27.2cm total aprox
+                    anchos = [3*cm, 3*cm, 4*cm, 7.5*cm, 2.7*cm, 6.5*cm]
+                    t = Table(data_list, repeatRows=1, colWidths=anchos)
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#34495e")),
+                        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+                        ('TOPPADDING', (0, 0), (-1, -1), 5),
+                    ]))
+                    elementos.append(t)
+                    elementos.append(Spacer(1, 15))
+
+            for fila in datos:
+                d = dict(fila) # Convertimos sqlite3.Row a diccionario
+                
+                # 1. ¿Ha cambiado la Sección?
+                if d['seccion'] != seccion_actual:
+                    if tabla_data:
+                        volcar_tabla_al_pdf(tabla_data)
+                        tabla_data = []
+                    
+                    seccion_actual = d['seccion']
+                    elementos.append(Paragraph(f"🏢 SECCIÓN: {str(seccion_actual).upper()}", estilo_seccion))
+                    lugar_actual = None # Forzamos que se escriba el lugar al cambiar de sección
+
+                # 2. ¿Ha cambiado el Lugar?
+                if d['lugar'] != lugar_actual:
+                    if tabla_data:
+                        volcar_tabla_al_pdf(tabla_data)
+                    
+                    lugar_actual = d['lugar']
+                    elementos.append(Paragraph(f"📍 Ubicación: {lugar_actual}", estilo_lugar))
+                    
+                    # Reiniciamos la tabla con sus encabezados
+                    tabla_data = [[
+                        Paragraph("Tipo", estilo_cabecera), Paragraph("Marca", estilo_cabecera),
+                        Paragraph("Modelo", estilo_cabecera), Paragraph("Usuario (Email)", estilo_cabecera),
+                        Paragraph("Fecha", estilo_cabecera), Paragraph("Observaciones", estilo_cabecera)
+                    ]]
+
+                # 3. Añadir los datos del dispositivo
+                tabla_data.append([
+                    Paragraph(str(d['tipo'] or ""), estilo_celda),
+                    Paragraph(str(d['marca'] or ""), estilo_celda),
+                    Paragraph(str(d['modelo'] or ""), estilo_celda),
+                    Paragraph(str(d['usuario'] or "---"), estilo_celda),
+                    Paragraph(str(d['fecha'] or ""), estilo_celda),
+                    Paragraph(str(d['observaciones'] or ""), estilo_celda)
+                ])
+
+            # Volcamos la última tabla pendiente
+            volcar_tabla_al_pdf(tabla_data)
+
+            # --- GENERACIÓN FINAL ---
+            doc.build(elementos, onFirstPage=añadir_pie_pagina, onLaterPages=añadir_pie_pagina)
             QMessageBox.information(self.vista, "Éxito", "Informe PDF generado correctamente y agrupado.")
 
         except Exception as e:
             QMessageBox.critical(self.vista, "Error al generar PDF", f"Detalle técnico: {str(e)}")
-
-def exportar_pdf_compacto(ruta, datos):
-    """Lógica de exportación a PDF compacta y desacoplada de la UI"""
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
-    from reportlab.lib.units import cm
-
-    doc = SimpleDocTemplate(
-        ruta, 
-        pagesize=landscape(A4),
-        rightMargin=1.0*cm, leftMargin=1.0*cm, 
-        topMargin=1.0*cm, bottomMargin=1.0*cm
-    )
-    
-    elementos = []
-    estilos = getSampleStyleSheet()
-    
-    # --- ESTILOS PERSONALIZADOS COMPACTOS ---
-    estilo_titulo = ParagraphStyle('DocTitle', parent=estilos['Title'], fontSize=20, alignment=0, textColor=colors.HexColor("#2c3e50"), spaceAfter=8)
-    estilo_seccion = ParagraphStyle('Sec', parent=estilos['Heading1'], fontSize=13, textColor=colors.HexColor("#27ae60"), spaceBefore=8, spaceAfter=4, fontName='Helvetica-Bold')
-    estilo_lugar = ParagraphStyle('Lug', parent=estilos['Heading2'], fontSize=10, textColor=colors.HexColor("#2980b9"), spaceBefore=4, spaceAfter=1)
-    
-    # Reducción de leading (interlineado) para compactar texto
-    estilo_cabecera = ParagraphStyle('Cab', parent=estilos['Normal'], fontSize=8, fontName='Helvetica-Bold', textColor=colors.whitesmoke, alignment=1, leading=9)
-    estilo_celda = ParagraphStyle('Cel', parent=estilos['Normal'], fontSize=8, alignment=1, leading=9)
-
-    def añadir_pie_pagina(canvas, document):
-        canvas.saveState()
-        from datetime import datetime
-        fecha_hoy = datetime.now().strftime('%dd/%mm/%YYYY')
-        texto_pie = f"Página {document.page} - Generado el {fecha_hoy} - Inventario Tecnológico"
-        canvas.setFont('Helvetica', 8)
-        canvas.drawCentredString(landscape(A4)[0] / 2, 0.8 * cm, texto_pie)
-        canvas.restoreState()
-
-    # --- ENCABEZADO ---
-    titulo_parrafo = Paragraph("INVENTARIO DE DISPOSITIVOS TECNOLÓGICOS", estilo_titulo)
-    try:
-        path_logo = resource_path("logo_servicio.png")
-        if os.path.exists(path_logo):
-            ancho_logo = 3.5 * cm # Logo algo más pequeño
-            alto_logo = (484 / 1240) * ancho_logo
-            logo_img = Image(path_logo, width=ancho_logo, height=alto_logo)
-            
-            header_table = Table([[titulo_parrafo, logo_img]], colWidths=[22*cm, 4.7*cm])
-            header_table.setStyle(TableStyle([
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
-            ]))
-            elementos.append(header_table)
-        else:
-            elementos.append(titulo_parrafo)
-    except:
-        elementos.append(titulo_parrafo)
-
-    elementos.append(Spacer(1, 3))
-
-    # --- LÓGICA DE AGRUPACIÓN ---
-    seccion_actual = None
-    lugar_actual = None
-    tabla_data = []
-
-    def volcar_tabla_al_pdf(data_list):
-        if len(data_list) > 1:
-            # Reajuste de Columnas (Total 27.7cm aprox en landscape A4 con márgenes de 1cm)
-            anchos = [3.8*cm, 2.2*cm, 3.5*cm, 9.5*cm, 2.2*cm, 6.5*cm]
-            t = Table(data_list, repeatRows=1, colWidths=anchos)
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#34495e")),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-                # ALTURA DE CELDAS: Padding reducido al mínimo
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5),
-                ('TOPPADDING', (0, 0), (-1, -1), 1.5),
-                ('LEFTPADDING', (0, 0), (-1, -1), 3),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-            ]))
-            elementos.append(t)
-            elementos.append(Spacer(1, 5))
-
-    for fila in datos:
-        d = dict(fila)
-        
-        if d['seccion'] != seccion_actual:
-            if tabla_data:
-                volcar_tabla_al_pdf(tabla_data)
-                tabla_data = []
-            seccion_actual = d['seccion']
-            elementos.append(Paragraph(f"🏢 SECCIÓN: {str(seccion_actual).upper()}", estilo_seccion))
-            lugar_actual = None
-
-        if d['lugar'] != lugar_actual:
-            if tabla_data:
-                volcar_tabla_al_pdf(tabla_data)
-            lugar_actual = d['lugar']
-            elementos.append(Paragraph(f"📍 Ubicación: {lugar_actual}", estilo_lugar))
-            tabla_data = [[
-                Paragraph("Tipo", estilo_cabecera), Paragraph("Marca", estilo_cabecera),
-                Paragraph("Modelo", estilo_cabecera), Paragraph("Usuario (Email)", estilo_cabecera),
-                Paragraph("Fecha", estilo_cabecera), Paragraph("Observaciones", estilo_cabecera)
-            ]]
-
-        tabla_data.append([
-            Paragraph(str(d['tipo'] or ""), estilo_celda),
-            Paragraph(str(d['marca'] or ""), estilo_celda),
-            Paragraph(str(d['modelo'] or ""), estilo_celda),
-            Paragraph(str(d['usuario'] or "---"), estilo_celda),
-            Paragraph(str(d['fecha'] or ""), estilo_celda),
-            Paragraph(str(d['observaciones'] or ""), estilo_celda)
-        ])
-
-    volcar_tabla_al_pdf(tabla_data)
-    doc.build(elementos, onFirstPage=añadir_pie_pagina, onLaterPages=añadir_pie_pagina)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
