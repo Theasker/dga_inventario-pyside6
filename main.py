@@ -39,14 +39,23 @@ def remover_tildes(texto):
                    if unicodedata.category(c) != 'Mn')
 
 def resource_path(relative_path):
-    """ Obtiene la ruta absoluta de los recursos, compatible con PyInstaller """
-    try:
-        # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
+    """ Obtiene la ruta absoluta de los recursos, compatible con PyInstaller 6+ (onedir y onefile) """
+    if hasattr(sys, '_MEIPASS'):
         base_path = sys._MEIPASS
-    except Exception:
+    else:
         base_path = os.path.abspath(".")
 
-    return os.path.join(base_path, relative_path)
+    # En PyInstaller 6+ onedir, los datos se suelen mover a una subcarpeta '_internal'
+    # Intentamos buscar en la raíz de _MEIPASS y luego en _internal
+    path_root = os.path.join(base_path, relative_path)
+    if os.path.exists(path_root):
+        return path_root
+        
+    path_internal = os.path.join(base_path, "_internal", relative_path)
+    if os.path.exists(path_internal):
+        return path_internal
+        
+    return path_root
 
 # --- MODELO ---
 class InventarioModel:
@@ -430,9 +439,14 @@ class InventarioVista(QMainWindow):
         self.resize(1450, 850)
 
         # Carga del icono usando la función de ruta segura
-        icon_path = resource_path("logo_servicio.png")
+        icon_path = resource_path("inventory_icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+        else:
+            # Reintento con png por si acaso
+            icon_path_png = resource_path("inventory_icon_source.png")
+            if os.path.exists(icon_path_png):
+                self.setWindowIcon(QIcon(icon_path_png))
         
         self._central_widget = QWidget()
         self.setCentralWidget(self._central_widget)
@@ -1361,7 +1375,7 @@ def exportar_pdf_compacto(ruta, datos):
     def añadir_pie_pagina(canvas, document):
         canvas.saveState()
         from datetime import datetime
-        fecha_hoy = datetime.now().strftime('%dd/%mm/%YYYY')
+        fecha_hoy = datetime.now().strftime('%d/%m/%Y')
         texto_pie = f"Página {document.page} - Generado el {fecha_hoy} - Inventario Tecnológico"
         canvas.setFont('Helvetica', 8)
         canvas.drawCentredString(landscape(A4)[0] / 2, 0.8 * cm, texto_pie)
